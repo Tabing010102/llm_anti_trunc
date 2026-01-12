@@ -110,7 +110,7 @@ class TestClaudeSSEParser:
     
     def test_strip_done_marker(self):
         """测试移除 done marker"""
-        chunk = b"event: content_block_delta\ndata: {\"delta\":{\"text\":\"完成[done]\"}}\n\n"
+        chunk = "event: content_block_delta\ndata: {\"delta\":{\"text\":\"完成[done]\"}}\n\n".encode("utf-8")
         
         result = ClaudeSSEParser.strip_done_marker(chunk, "[done]")
         result_text = result.decode("utf-8")

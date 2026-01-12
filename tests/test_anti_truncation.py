@@ -42,7 +42,9 @@ class TestShouldEnableAntiTruncation:
         """测试 query 参数触发"""
         mock_request = Mock()
         mock_request.headers = Mock(get=Mock(return_value=""))
-        mock_request.query_params = Mock(get=Mock(side_effect=lambda k: "1" if k == "anti_truncation" else ""))
+        mock_request.query_params = Mock(
+            get=Mock(side_effect=lambda k, default="": "1" if k == "anti_truncation" else default)
+        )
         
         result = should_enable_anti_truncation(mock_request, {}, is_streaming=True)
         assert result is True
