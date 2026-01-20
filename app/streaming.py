@@ -6,6 +6,8 @@ import logging
 from typing import Dict, Any, Optional, AsyncIterator, Literal
 from enum import Enum
 
+import httpx
+
 from app.config import config
 from app.parsers import OpenAISSEParser, GeminiSSEParser, ClaudeSSEParser
 from app.upstream import UpstreamClient, build_upstream_url
@@ -79,6 +81,17 @@ class StreamingAntiTruncationProcessor:
         
         # 客户端断连标志
         self.client_disconnected = False
+        
+        # 可重试的上游状态码（瞬时错误/限流）
+        self.retryable_upstream_status_codes = {
+            408,  # Request Timeout
+            425,  # Too Early（部分代理/网关会用）
+            429,  # Too Many Requests
+            500,  # Internal Server Error
+            502,  # Bad Gateway
+            503,  # Service Unavailable
+            504,  # Gateway Timeout
+        }
     
     async def process_stream(
         self,
@@ -167,6 +180,10 @@ class StreamingAntiTruncationProcessor:
                         )
                         
                         yield cleaned_chunk
+                        
+                        # 一旦检测到 done marker，就主动结束本次上游流，避免等待上游继续输出导致下游取消
+                        if self.done_marker_found:
+                            break
                 
                 # 记录本次 attempt
                 log_anti_truncation_attempt(
@@ -198,7 +215,47 @@ class StreamingAntiTruncationProcessor:
                 logger.info(
                     f"[{self.request_id}] 未检测到 done marker，准备续写..."
                 )
+
+            except asyncio.CancelledError:
+                # 不要吞掉取消信号：让路由层记录“被取消”，并尽快终止
+                raise
+
+            except httpx.HTTPStatusError as e:
+                status_code = None
+                try:
+                    status_code = e.response.status_code if e.response else None
+                except Exception:
+                    status_code = None
                 
+                # 上游瞬时错误：允许在剩余 attempt 内重试
+                if (
+                    status_code in self.retryable_upstream_status_codes
+                    and self.attempt < self.max_attempts
+                    and not self.done_marker_found
+                    and not self.client_disconnected
+                ):
+                    logger.warning(
+                        f"[{self.request_id}] 上游返回 {status_code}，将进行重试 "
+                        f"(attempt {self.attempt}/{self.max_attempts})"
+                    )
+                    continue
+                
+                # 不可重试或已无剩余 attempt：向下游发送错误事件并结束
+                logger.error(
+                    f"[{self.request_id}] 上游错误 (attempt {self.attempt}): {e}",
+                    exc_info=True
+                )
+                import json
+                error_event = {
+                    "error": "upstream_error",
+                    "status_code": status_code,
+                    "message": str(e),
+                    "attempt": self.attempt,
+                    "request_id": self.request_id
+                }
+                yield f"data: {json.dumps(error_event)}\n\n".encode("utf-8")
+                break
+
             except Exception as e:
                 logger.error(
                     f"[{self.request_id}] 流式处理异常 (attempt {self.attempt}): {e}",
