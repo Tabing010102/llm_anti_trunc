@@ -3,6 +3,7 @@
 """
 import asyncio
 import logging
+import time
 from typing import Dict, Any, Optional, AsyncIterator, Literal
 from enum import Enum
 
@@ -65,6 +66,7 @@ class StreamingAntiTruncationProcessor:
         # 状态
         self.collected_text = ""
         self.done_marker_found = False
+        self._done_marker_tail = ""  # 用于跨 chunk 检测 done marker
         self.attempt = 0
         self.max_attempts = config.ANTI_TRUNCATION_MAX_ATTEMPTS
         self.done_marker = config.ANTI_TRUNCATION_DONE_MARKER
@@ -92,6 +94,33 @@ class StreamingAntiTruncationProcessor:
             503,  # Service Unavailable
             504,  # Gateway Timeout
         }
+        
+        # 心跳/空闲超时（用于避免“长时间无数据 -> 下游取消 -> 无法重试”）
+        self.keepalive_interval_seconds = max(
+            0.0, float(getattr(config, "ANTI_TRUNCATION_KEEPALIVE_INTERVAL_SECONDS", 0.0))
+        )
+        self.upstream_idle_timeout_seconds = max(
+            0.0, float(getattr(config, "ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS", 0.0))
+        )
+    
+    def _update_done_marker_state(self, delta_text: str) -> bool:
+        """
+        跨 chunk 检测 done marker，避免 marker 被拆分导致漏检。
+        
+        Returns:
+            本次 delta_text 是否触发检测到 marker
+        """
+        if not delta_text:
+            return False
+        
+        combined = f"{self._done_marker_tail}{delta_text}"
+        if self.done_marker in combined:
+            self.done_marker_found = True
+            return True
+        
+        keep = max(0, len(self.done_marker) - 1)
+        self._done_marker_tail = combined[-keep:] if keep > 0 else ""
+        return False
     
     async def process_stream(
         self,
@@ -142,12 +171,53 @@ class StreamingAntiTruncationProcessor:
                     if self.query_string:
                         upstream_url = f"{upstream_url}?{self.query_string}"
                     
-                    async for chunk in upstream_client.stream_request(
+                    upstream_iter = upstream_client.stream_request(
                         method="POST",
                         url=upstream_url,
                         headers=self.headers,
                         json=current_body
-                    ):
+                    )
+                    
+                    last_upstream_chunk_at = time.monotonic()
+                    
+                    while True:
+                        # 即使还没等到上游数据，也要尽快响应客户端断连
+                        if client_disconnect_check and client_disconnect_check.is_set():
+                            logger.warning(
+                                f"[{self.request_id}] 客户端断开连接，取消流式传输"
+                            )
+                            self.client_disconnected = True
+                            return
+                        
+                        wait_timeout = self.keepalive_interval_seconds if self.keepalive_interval_seconds > 0 else None
+                        
+                        try:
+                            if wait_timeout is None:
+                                chunk = await upstream_iter.__anext__()
+                            else:
+                                chunk = await asyncio.wait_for(upstream_iter.__anext__(), timeout=wait_timeout)
+                            last_upstream_chunk_at = time.monotonic()
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            # keepalive：避免中间层空闲断开导致“无重试机会”
+                            if self.keepalive_interval_seconds > 0:
+                                yield b": keepalive\n\n"
+                            
+                            # 上游长时间无数据：触发下一次 attempt（若有剩余）
+                            if (
+                                self.upstream_idle_timeout_seconds > 0
+                                and (time.monotonic() - last_upstream_chunk_at) >= self.upstream_idle_timeout_seconds
+                                and self.attempt < self.max_attempts
+                                and not self.done_marker_found
+                            ):
+                                logger.warning(
+                                    f"[{self.request_id}] 上游超过 {self.upstream_idle_timeout_seconds}s 无数据，"
+                                    f"触发重试 (attempt {self.attempt}/{self.max_attempts})"
+                                )
+                                raise RuntimeError("upstream_idle_timeout_for_retry")
+                            continue
+                        
                         # 检查客户端是否断连
                         if client_disconnect_check and client_disconnect_check.is_set():
                             logger.warning(
@@ -166,8 +236,7 @@ class StreamingAntiTruncationProcessor:
                             self.collected_text += delta_text
                             
                             # 检查是否包含 done marker
-                            if self.done_marker in delta_text:
-                                self.done_marker_found = True
+                            if self._update_done_marker_state(delta_text):
                                 attempt_done_marker_found = True
                                 logger.info(
                                     f"[{self.request_id}] 检测到 done marker！"
@@ -218,6 +287,17 @@ class StreamingAntiTruncationProcessor:
 
             except asyncio.CancelledError:
                 # 不要吞掉取消信号：让路由层记录“被取消”，并尽快终止
+                raise
+            
+            except RuntimeError as e:
+                # 上游空闲超时触发重试（见 upstream_idle_timeout_for_retry）
+                if (
+                    str(e) == "upstream_idle_timeout_for_retry"
+                    and self.attempt < self.max_attempts
+                    and not self.done_marker_found
+                    and not self.client_disconnected
+                ):
+                    continue
                 raise
 
             except httpx.HTTPStatusError as e:

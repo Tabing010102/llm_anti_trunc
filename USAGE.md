@@ -23,6 +23,8 @@ cp .env.example .env
 - `UPSTREAM_CLAUDE_BASE_URL`: Claude 上游地址
 - `TRUST_PROXY_HEADERS`: 是否信任代理头（默认 `true`）
 - `TRUSTED_PROXY_CIDRS`: 可信代理 CIDR 列表（默认私网+本机）
+- `ANTI_TRUNCATION_KEEPALIVE_INTERVAL_SECONDS`: 流式 keepalive 间隔秒数（默认 `5`；避免中间层空闲断开）
+- `ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS`: 上游连续无数据超时秒数（默认 `30`；超时后触发重试/续写）
 
 ### 3. 启动服务
 

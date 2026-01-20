@@ -19,6 +19,16 @@ class Config:
     ANTI_TRUNCATION_DONE_MARKER: str = os.getenv("ANTI_TRUNCATION_DONE_MARKER", "[done]")
     ANTI_TRUNCATION_MODEL_PREFIX: str = os.getenv("ANTI_TRUNCATION_MODEL_PREFIX", "流式抗截断/")
     
+    # 抗截断流式健康度配置
+    # - KEEPALIVE: 无上游数据时，给客户端发送 SSE 注释心跳，避免中间层/客户端因空闲断开
+    # - UPSTREAM_IDLE_TIMEOUT: 上游长期无数据则认为卡住，触发下一次 attempt（若有剩余）
+    ANTI_TRUNCATION_KEEPALIVE_INTERVAL_SECONDS: float = float(
+        os.getenv("ANTI_TRUNCATION_KEEPALIVE_INTERVAL_SECONDS", "5")
+    )
+    ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS: float = float(
+        os.getenv("ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS", "30")
+    )
+    
     # 透明代理/真实IP配置
     TRUST_PROXY_HEADERS: bool = os.getenv("TRUST_PROXY_HEADERS", "true").lower() == "true"
     TRUSTED_PROXY_CIDRS: str = os.getenv(

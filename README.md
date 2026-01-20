@@ -71,6 +71,8 @@ curl http://localhost:8000/health
 - `ANTI_TRUNCATION_MAX_ATTEMPTS`: 最大续写次数（默认：`3`）
 - `ANTI_TRUNCATION_DONE_MARKER`: 完成标记（默认：`[done]`）
 - `ANTI_TRUNCATION_MODEL_PREFIX`: 模型名前缀触发抗截断（默认：`流式抗截断/`）
+- `ANTI_TRUNCATION_KEEPALIVE_INTERVAL_SECONDS`: 流式 keepalive 间隔秒数（默认：`5`；会向客户端发送 `: keepalive` SSE 注释，避免中间层空闲断开）
+- `ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS`: 上游连续无数据的超时秒数（默认：`30`；超时后会触发下一次 attempt 重试）
 
 ### 透明代理/真实IP
 
