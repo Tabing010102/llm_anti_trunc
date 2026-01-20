@@ -26,10 +26,35 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+Windows PowerShell 用户可运行：`Copy-Item .env.example .env`
+
 ### 启动服务
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+### Docker 启动（推荐）
+
+```bash
+# 构建镜像
+docker build -t llm-anti-trunc .
+
+# 运行（如需自定义配置，请先准备 .env）
+docker run --rm -p 8000:8000 --env-file .env llm-anti-trunc
+```
+
+也可以用 Compose 一键启动（使用仓库自带的 `docker-compose.yml`；旧版 Docker 可用 `docker-compose`）：
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+验证服务：
+
+```bash
+curl http://localhost:8000/health
 ```
 
 ## 配置说明
