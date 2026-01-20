@@ -178,6 +178,11 @@ def build_upstream_headers(request: Request, upstream_host: str) -> Dict[str, st
         lower_key = key.lower()
         if lower_key not in HOP_BY_HOP_HEADERS and lower_key != "host":
             upstream_headers[key] = value
+
+    # 1.1 关键：不要透传 Content-Length（body 可能会被修改；由 httpx 重新计算）
+    for k in list(upstream_headers.keys()):
+        if k.lower() == "content-length":
+            upstream_headers.pop(k, None)
     
     # 2. 获取客户端真实 IP
     client_ip = get_client_ip(request)

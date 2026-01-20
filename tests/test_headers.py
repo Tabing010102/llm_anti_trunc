@@ -161,3 +161,27 @@ class TestBuildUpstreamHeaders:
         assert result["x-forwarded-proto"] == "https"
         assert result["x-forwarded-host"] == "example.com"
         assert "x-forwarded-port" in result
+
+    def test_content_length_should_not_be_forwarded(self):
+        """
+        回归测试：Content-Length 不应被透传到上游。
+
+        原因：抗截断/注入等会改写 JSON body，若透传旧的 Content-Length，
+        上游请求发送阶段会触发 h11 LocalProtocolError:
+        Too much data for declared Content-Length
+        """
+        mock_request = Mock(spec=Request)
+        mock_request.client = Mock(host="1.2.3.4")
+        mock_request.headers = Headers(
+            {
+                "content-type": "application/json",
+                "content-length": "5",
+            }
+        )
+        mock_request.url = Mock(scheme="https")
+
+        with patch("app.headers.config") as mock_config:
+            mock_config.TRUST_PROXY_HEADERS = False
+            result = build_upstream_headers(mock_request, "api.example.com")
+
+        assert all(k.lower() != "content-length" for k in result.keys())
