@@ -72,7 +72,7 @@ curl http://localhost:8000/health
 - `ANTI_TRUNCATION_DONE_MARKER`: 完成标记（默认：`[done]`）
 - `ANTI_TRUNCATION_MODEL_PREFIX`: 模型名前缀触发抗截断（默认：`流式抗截断/`）
 - `ANTI_TRUNCATION_KEEPALIVE_INTERVAL_SECONDS`: 流式 keepalive 间隔秒数（默认：`5`；会向客户端发送 `: keepalive` SSE 注释，避免中间层空闲断开）
-- `ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS`: 上游连续无数据的超时秒数（默认：`30`；超时后会触发下一次 attempt 重试）
+- `ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS`: 上游**开始有输出后**连续无数据的超时秒数（默认：`30`；超时后会触发下一次 attempt 重试；为避免慢启动误触发，首个 chunk 到来前不会触发该重试）
 
 ### 透明代理/真实IP
 

@@ -184,7 +184,7 @@ app/
 - `ANTI_TRUNCATION_DONE_MARKER` (默认: `[done]`)
 - `ANTI_TRUNCATION_MODEL_PREFIX` (默认: `流式抗截断/`)
 - `ANTI_TRUNCATION_KEEPALIVE_INTERVAL_SECONDS` (默认: `5`)：无上游数据时向客户端发送 `: keepalive` SSE 注释，避免中间层/客户端因空闲断开
-- `ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS` (默认: `30`)：上游连续无数据超过该阈值则触发下一次 attempt 重试（若仍有剩余尝试次数）
+- `ANTI_TRUNCATION_UPSTREAM_IDLE_TIMEOUT_SECONDS` (默认: `30`)：上游开始有输出后，连续无数据超过该阈值则触发下一次 attempt 重试（若仍有剩余尝试次数；首个 chunk 到来前不会触发该重试）
 
 ### 透明代理/真实IP
 

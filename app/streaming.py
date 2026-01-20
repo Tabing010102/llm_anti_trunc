@@ -179,6 +179,7 @@ class StreamingAntiTruncationProcessor:
                     )
                     
                     last_upstream_chunk_at = time.monotonic()
+                    pending_chunk_task: Optional[asyncio.Task] = None
                     
                     while True:
                         # 即使还没等到上游数据，也要尽快响应客户端断连
@@ -187,26 +188,37 @@ class StreamingAntiTruncationProcessor:
                                 f"[{self.request_id}] 客户端断开连接，取消流式传输"
                             )
                             self.client_disconnected = True
+                            if pending_chunk_task is not None:
+                                pending_chunk_task.cancel()
+                                try:
+                                    await pending_chunk_task
+                                except asyncio.CancelledError:
+                                    pass
                             return
+                        
+                        if pending_chunk_task is None:
+                            # 不能对 __anext__ 使用 asyncio.wait_for 做 keepalive：
+                            # wait_for 超时会 cancel __anext__，会导致上游流被意外中断，
+                            # 进而出现“上游慢 -> relay 误以为结束 -> 立刻重试”的问题。
+                            pending_chunk_task = asyncio.create_task(upstream_iter.__anext__())
                         
                         wait_timeout = self.keepalive_interval_seconds if self.keepalive_interval_seconds > 0 else None
                         
-                        try:
-                            if wait_timeout is None:
-                                chunk = await upstream_iter.__anext__()
-                            else:
-                                chunk = await asyncio.wait_for(upstream_iter.__anext__(), timeout=wait_timeout)
-                            last_upstream_chunk_at = time.monotonic()
-                        except StopAsyncIteration:
-                            break
-                        except asyncio.TimeoutError:
+                        done, _ = await asyncio.wait(
+                            {pending_chunk_task},
+                            timeout=wait_timeout
+                        )
+                        
+                        if not done:
                             # keepalive：避免中间层空闲断开导致“无重试机会”
                             if self.keepalive_interval_seconds > 0:
                                 yield b": keepalive\n\n"
                             
                             # 上游长时间无数据：触发下一次 attempt（若有剩余）
+                            # 仅在“已经开始输出（chunk_count>0）”后启用，避免慢启动误触发
                             if (
-                                self.upstream_idle_timeout_seconds > 0
+                                chunk_count > 0
+                                and self.upstream_idle_timeout_seconds > 0
                                 and (time.monotonic() - last_upstream_chunk_at) >= self.upstream_idle_timeout_seconds
                                 and self.attempt < self.max_attempts
                                 and not self.done_marker_found
@@ -215,8 +227,29 @@ class StreamingAntiTruncationProcessor:
                                     f"[{self.request_id}] 上游超过 {self.upstream_idle_timeout_seconds}s 无数据，"
                                     f"触发重试 (attempt {self.attempt}/{self.max_attempts})"
                                 )
+                                pending_chunk_task.cancel()
+                                try:
+                                    await pending_chunk_task
+                                except asyncio.CancelledError:
+                                    pass
+                                pending_chunk_task = None
+                                try:
+                                    await upstream_iter.aclose()
+                                except Exception:
+                                    pass
                                 raise RuntimeError("upstream_idle_timeout_for_retry")
+                            
                             continue
+                        
+                        # done: 取回 chunk（可能 StopAsyncIteration 或异常）
+                        task = pending_chunk_task
+                        pending_chunk_task = None
+                        try:
+                            chunk = task.result()
+                        except StopAsyncIteration:
+                            break
+                        
+                        last_upstream_chunk_at = time.monotonic()
                         
                         # 检查客户端是否断连
                         if client_disconnect_check and client_disconnect_check.is_set():
@@ -329,6 +362,33 @@ class StreamingAntiTruncationProcessor:
                 error_event = {
                     "error": "upstream_error",
                     "status_code": status_code,
+                    "message": str(e),
+                    "attempt": self.attempt,
+                    "request_id": self.request_id
+                }
+                yield f"data: {json.dumps(error_event)}\n\n".encode("utf-8")
+                break
+
+            except httpx.RequestError as e:
+                # 上游网络/传输层异常（如 TCP 断开、连接失败等）：允许在剩余 attempt 内重试
+                if (
+                    self.attempt < self.max_attempts
+                    and not self.done_marker_found
+                    and not self.client_disconnected
+                ):
+                    logger.warning(
+                        f"[{self.request_id}] 上游网络异常，将进行重试 "
+                        f"(attempt {self.attempt}/{self.max_attempts}): {e}"
+                    )
+                    continue
+                
+                logger.error(
+                    f"[{self.request_id}] 上游网络异常 (attempt {self.attempt}): {e}",
+                    exc_info=True
+                )
+                import json
+                error_event = {
+                    "error": "upstream_request_error",
                     "message": str(e),
                     "attempt": self.attempt,
                     "request_id": self.request_id
