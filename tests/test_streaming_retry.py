@@ -9,6 +9,10 @@ def _openai_sse_chunk(content: str) -> bytes:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
+def _openai_done_chunk() -> bytes:
+    return b"data: [DONE]\n\n"
+
+
 @pytest.mark.asyncio
 async def test_retry_when_stream_ends_without_done_marker(monkeypatch):
     from app.streaming import StreamingAntiTruncationProcessor, ProtocolType
@@ -56,6 +60,7 @@ async def test_retry_when_stream_ends_without_done_marker(monkeypatch):
     out = b"".join([c async for c in p.process_stream()])
     assert calls["count"] == 2
     assert b"[done]" not in out  # marker 被剥离，不应透传给客户端
+    assert b"data: [DONE]" in out  # OpenAI 下游应能拿到结束标记
 
 
 @pytest.mark.asyncio
@@ -99,6 +104,7 @@ async def test_stop_consuming_upstream_after_done_marker(monkeypatch):
     assert b"SHOULD_NOT_BE_FORWARDED" not in out
     # 关键：检测到 done marker 后就 break，不应继续消费第二个 chunk
     assert consumed["chunks"] == 1
+    assert b"data: [DONE]" in out
 
 
 @pytest.mark.asyncio
@@ -143,6 +149,7 @@ async def test_retry_on_upstream_429(monkeypatch):
     assert calls["count"] == 2
     assert b"upstream_error" not in out
     assert b"[done]" not in out
+    assert b"data: [DONE]" in out
 
 
 @pytest.mark.asyncio
@@ -191,6 +198,7 @@ async def test_retry_on_upstream_idle_timeout_and_emit_keepalive(monkeypatch):
     assert calls["count"] == 2
     assert b": keepalive\n\n" in out  # 期间应发过 keepalive
     assert b"[done]" not in out
+    assert b"data: [DONE]" in out
 
 
 @pytest.mark.asyncio
@@ -233,6 +241,7 @@ async def test_retry_on_upstream_request_error(monkeypatch):
     assert calls["count"] == 2
     assert b"upstream_request_error" not in out
     assert b"[done]" not in out
+    assert b"data: [DONE]" in out
 
 
 @pytest.mark.asyncio
@@ -277,4 +286,59 @@ async def test_slow_first_chunk_should_wait_and_not_retry(monkeypatch):
     assert calls["count"] == 1  # 不应因为“慢”就立刻重试
     assert b": keepalive\n\n" in out
     assert b"[done]" not in out
+    assert b"data: [DONE]" in out
+
+
+@pytest.mark.asyncio
+async def test_suppress_upstream_done_when_no_done_marker_and_retry(monkeypatch):
+    """
+    对齐 gcli2api 行为：
+    - 上游发送 data: [DONE] 但未找到 [done] 时，不能把 [DONE] 透传给下游（否则下游会断开导致无法重试）
+    - 最终完成时只发送一次 [DONE]（由 relay 发送）
+    """
+    from app.streaming import StreamingAntiTruncationProcessor, ProtocolType
+    import app.streaming as streaming_mod
+
+    monkeypatch.setattr(streaming_mod.config, "ANTI_TRUNCATION_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(streaming_mod.config, "ANTI_TRUNCATION_DONE_MARKER", "[done]")
+
+    scenarios = [
+        [
+            _openai_done_chunk(),  # attempt1：上游直接结束，但没有 [done]
+        ],
+        [
+            _openai_sse_chunk("ok[done]"),
+            _openai_done_chunk(),  # attempt2：上游结束（该 [DONE] 也应被抑制）
+        ],
+    ]
+    calls = {"count": 0}
+
+    class FakeUpstreamClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        async def stream_request(self, method, url, headers, content=None, json=None):
+            idx = calls["count"]
+            calls["count"] += 1
+            for c in scenarios[idx]:
+                yield c
+
+    monkeypatch.setattr(streaming_mod, "UpstreamClient", FakeUpstreamClient)
+
+    p = StreamingAntiTruncationProcessor(
+        protocol=ProtocolType.OPENAI,
+        request_id="rid",
+        upstream_base_url="http://upstream",
+        path="/v1/chat/completions",
+        headers={},
+        request_body={"stream": True, "model": "gpt-4"},
+    )
+
+    out = b"".join([c async for c in p.process_stream()])
+    assert calls["count"] == 2
+    assert b"[done]" not in out
+    assert out.count(b"data: [DONE]") == 1
 

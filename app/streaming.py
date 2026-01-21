@@ -259,6 +259,18 @@ class StreamingAntiTruncationProcessor:
                             self.client_disconnected = True
                             return
                         
+                        # === 关键：对 OpenAI 的 "data: [DONE]" 做反截断语义处理 ===
+                        # gcli2api 的做法：只有在已检测到 [done] marker 时才允许把 [DONE] 发给下游；
+                        # 否则视为“上游结束但未完整输出”，进入续写重试。
+                        if self.protocol == ProtocolType.OPENAI:
+                            try:
+                                chunk_str = chunk.decode("utf-8", errors="ignore").strip()
+                            except Exception:
+                                chunk_str = ""
+                            if chunk_str == "data: [DONE]":
+                                # 抑制 [DONE] 事件：避免下游提前认为流结束而断开连接
+                                break
+
                         chunk_count += 1
                         
                         # 解析 chunk，提取文本
@@ -301,6 +313,9 @@ class StreamingAntiTruncationProcessor:
                         f"[{self.request_id}] 抗截断完成，共 {self.attempt} 次尝试，"
                         f"收集 {len(self.collected_text)} 字符"
                     )
+                    # OpenAI SSE：主动发送 [DONE]，避免因我们提前结束上游而让下游一直等待 [DONE]
+                    if self.protocol == ProtocolType.OPENAI:
+                        yield b"data: [DONE]\n\n"
                     break
                 
                 # 如果未找到 done marker，但已是最后一次尝试
@@ -311,6 +326,9 @@ class StreamingAntiTruncationProcessor:
                     )
                     # 发送一个特殊的响应头提示（通过 SSE 注释）
                     yield f": X-Anti-Truncation-Max-Attempts-Reached\n\n".encode("utf-8")
+                    # OpenAI SSE：确保以 [DONE] 正常结束
+                    if self.protocol == ProtocolType.OPENAI:
+                        yield b"data: [DONE]\n\n"
                     break
                 
                 # 否则，准备下一次续写
@@ -367,6 +385,8 @@ class StreamingAntiTruncationProcessor:
                     "request_id": self.request_id
                 }
                 yield f"data: {json.dumps(error_event)}\n\n".encode("utf-8")
+                if self.protocol == ProtocolType.OPENAI:
+                    yield b"data: [DONE]\n\n"
                 break
 
             except httpx.RequestError as e:
@@ -394,6 +414,8 @@ class StreamingAntiTruncationProcessor:
                     "request_id": self.request_id
                 }
                 yield f"data: {json.dumps(error_event)}\n\n".encode("utf-8")
+                if self.protocol == ProtocolType.OPENAI:
+                    yield b"data: [DONE]\n\n"
                 break
 
             except Exception as e:
@@ -410,6 +432,8 @@ class StreamingAntiTruncationProcessor:
                     "request_id": self.request_id
                 }
                 yield f"data: {json.dumps(error_event)}\n\n".encode("utf-8")
+                if self.protocol == ProtocolType.OPENAI:
+                    yield b"data: [DONE]\n\n"
                 break
         
         # 流结束

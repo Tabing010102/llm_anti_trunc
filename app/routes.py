@@ -126,7 +126,9 @@ async def handle_openai_chat_completions(request: Request) -> Response:
                     "x-request-id": request_id,
                     "x-anti-truncation": "enabled",
                     "cache-control": "no-cache",
-                    "connection": "keep-alive"
+                    "connection": "keep-alive",
+                    # 避免 Nginx 等反代缓冲 SSE，导致 keepalive/首包无法及时到达下游
+                    "x-accel-buffering": "no"
                 }
             )
         else:
@@ -270,7 +272,10 @@ async def handle_gemini_generate_content(
                 media_type="text/event-stream",
                 headers={
                     "x-request-id": request_id,
-                    "x-anti-truncation": "enabled"
+                    "x-anti-truncation": "enabled",
+                    "cache-control": "no-cache",
+                    "connection": "keep-alive",
+                    "x-accel-buffering": "no"
                 }
             )
         else:
@@ -392,7 +397,10 @@ async def handle_claude_messages(request: Request) -> Response:
                 media_type="text/event-stream",
                 headers={
                     "x-request-id": request_id,
-                    "x-anti-truncation": "enabled"
+                    "x-anti-truncation": "enabled",
+                    "cache-control": "no-cache",
+                    "connection": "keep-alive",
+                    "x-accel-buffering": "no"
                 }
             )
         else:
@@ -504,7 +512,12 @@ async def _simple_streaming_proxy(
     return StreamingResponse(
         stream_generator(),
         media_type="text/event-stream",
-        headers={"x-request-id": request_id}
+        headers={
+            "x-request-id": request_id,
+            "cache-control": "no-cache",
+            "connection": "keep-alive",
+            "x-accel-buffering": "no"
+        }
     )
 
 
